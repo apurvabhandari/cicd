@@ -1,0 +1,95 @@
+pipeline {
+    agent {
+        label "master"
+    }
+    tools {
+        // Note: this should match with the tool name configured in your jenkins instance (JENKINS_URL/configureTools/)
+        maven "Maven 3.6.0"
+    }
+    environment {
+        
+        NEXUS_VERSION = "nexus3"
+       
+        NEXUS_PROTOCOL = "http"
+        
+        NEXUS_URL = "192.168.130.63:8081"
+       
+        NEXUS_REPOSITORY = "new2"
+       
+        NEXUS_CREDENTIAL_ID = "nexus-credentials"
+    }
+    stages {
+        stage("clone code") {
+            steps {
+                script {
+                    
+                    git credentialsId: 'aa1', url: 'https://gitlab.techverito.com/internal/devops-java-test.git'
+                }
+            }
+        }
+        
+        stage("build && SonarQube analysis") {
+            steps {
+                withSonarQubeEnv("sonarqube") {
+                    
+                   sh "mvn clean package sonar:sonar"
+                   
+                }
+            }
+        }
+  
+        stage("mvn build") {
+            steps {
+                script {
+                   
+                    sh "mvn package -DskipTests=true"
+                }
+            }
+        }
+		
+		
+		
+        stage("publish to nexus") {
+            steps {
+                script {
+                  
+                    pom = readMavenPom file: "pom.xml";
+                    
+                    filesByGlob = findFiles(glob: "target/*.${pom.packaging}");
+                   
+                    echo "${filesByGlob[0].name} ${filesByGlob[0].path} ${filesByGlob[0].directory} ${filesByGlob[0].length} ${filesByGlob[0].lastModified}"
+                   
+                    artifactPath = filesByGlob[0].path;
+                   
+                    artifactExists = fileExists artifactPath;
+                    if(artifactExists) {
+                        echo "*** File: ${artifactPath}, group: ${pom.groupId}, packaging: ${pom.packaging}, version ${pom.version}";
+                        nexusArtifactUploader(
+                            nexusVersion: NEXUS_VERSION,
+                            protocol: NEXUS_PROTOCOL,
+                            nexusUrl: NEXUS_URL,
+                            groupId: pom.groupId,
+                            version: pom.version,
+                            repository: NEXUS_REPOSITORY,
+                            credentialsId: NEXUS_CREDENTIAL_ID,
+                            artifacts: [
+                                // Artifact generated such as .jar, .ear and .war files.
+                                [artifactId: pom.artifactId,
+                                classifier: '',
+                                file: artifactPath,
+                                type: pom.packaging],
+                                // Lets upload the pom.xml file for additional information for Transitive dependencies
+                                [artifactId: pom.artifactId,
+                                classifier: '',
+                                file: "pom.xml",
+                                type: "pom"]
+                            ]
+                        );
+                    } else {
+                        error "*** File: ${artifactPath}, could not be found";
+                    }
+                }
+            }
+        }
+    }
+}
