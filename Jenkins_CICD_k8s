@@ -1,0 +1,39 @@
+pipeline {
+    agent any
+    environment {
+        PROJECT_ID = 'ops-poc'
+        CLUSTER_NAME = 'istio-test-cluster-abhi'
+        LOCATION = 'us-central1-c'
+        CREDENTIALS_ID = 'gke'
+    }
+    stages {
+        stage('Cloning Git') {
+      steps {
+        git credentialsId: 'My_Github', url: 'https://github.com/abhigoyal1985/myproject.git'
+      }
+    }
+        stage("Build image") {
+            steps {
+                script {
+                    myapp = docker.build("abhigoyal1985/hello:${env.BUILD_ID}")
+                }
+            }
+        }
+        stage("Push image") {
+            steps {
+                script {
+                    docker.withRegistry('https://registry.hub.docker.com', 'dockerhub') {
+                            myapp.push("latest")
+                            myapp.push("${env.BUILD_ID}")
+                    }
+                }
+            }
+        }        
+        stage('Deploy to GKE') {
+            steps{
+                sh "sed -i 's/hello:latest/hello:${env.BUILD_ID}/g' deployment.yaml"
+                step([$class: 'KubernetesEngineBuilder', projectId: env.PROJECT_ID, clusterName: env.CLUSTER_NAME, location: env.LOCATION, manifestPattern: 'deployment.yaml', credentialsId: env.CREDENTIALS_ID, verifyDeployments: true])
+            }
+        }
+    }    
+}
