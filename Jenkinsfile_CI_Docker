@@ -1,0 +1,198 @@
+// Constants
+ciNode = "k8s-ci"
+node {
+    ciNode = "k8s-ci"
+}
+node(ciNode) {
+    env.JAVA_HOME = "${tool 'java-1.8'}"
+
+  timestamps {
+         try {
+            stage("prep") {
+  checkout([
+    $class: 'GitSCM', branches: [[name: env.BRANCH_NAME]],
+  userRemoteConfigs: [[url: 'https://bitbucket.org/vuclipengineering/viu-browser.git',credentialsId:'BITBUCKET_SINGH']]
+])    
+            }
+    } catch (e) {
+            currentBuild.result = 'FAILURE'
+            throw e
+        }
+    }
+/*    stage("Delete old and dangling images"){
+        sh '''
+        docker rm $(docker ps -q -f 'status=exited') || echo "no container to delete"
+        docker rmi $(docker images -q -f "dangling=true") || echo "no args for images rmi"
+        docker images | grep "us.gcr.io/ppp-prod/viu-browser2" | egrep "days|minutes|months"| head -10 | tail -7 | awk '{print $3}' |xargs docker rmi --force
+        '''
+    }*/
+    stage("prepare dockerfile"){
+        sh '''
+            cat <<'EOF' > entry_point.sh
+      # Mount glusterfs in ENABLED
+sleep 0.5
+echo "GLUSTER: $GLUSTER_ENABLED ; PUB_SUB_ENABLED : \$PUB_SUB_ENABLED " > /tmp/statusfile.status
+if [[ \$GLUSTER_ENABLED -eq 1 ]]
+then
+  _name="\$NODE_NAME/\$(date +%F)/\${POD_IP}_\${HOSTNAME}"
+  cd /mnt/glusterfs 
+  mkdir -p "\${_name}" 
+  rm -rf ${appDir}/logs
+  ln -s "/mnt/glusterfs/\${_name}" ${appDir}/logs
+
+fi
+
+if [[ \$PUB_SUB_ENABLED -eq 1 ]]
+then
+    mkdir -p "\${appDir}/key"
+  ln -s /mnt/secrets-config/ppp-prod-3741b9090ad6.p12 "\${appDir}/key/ppp-prod-3741b9090ad6.p12" || echo 0
+fi
+
+if [[ \$NR_ENABLED -eq 1 ]]
+then
+  
+  cp -pr /var/www/app/current/node_modules/newrelic/newrelic.js /var/www/app/current/newrelic.js 
+  sed -i "s/license_key: 'license key here'/license_key: 'e727add0a5d87ad7712c20c62e5a726cdd440101'/g" /var/www/app/current/newrelic.js
+  #sed -i 's/My Application/browser2/g' /var/www/app/current/newrelic.js
+  sed  -i "s/app_name:.*,$/app_name: '[browser2]',/g" /var/www/app/current/newrelic.js
+
+fi
+
+
+exit 0
+
+
+
+EOF
+
+chmod 777 entry_point.sh
+
+
+cat <<'EOF'>Dockerfile 
+FROM us.gcr.io/ppp-prod/common:node_8_9_1_perf_v2
+#FROM us.gcr.io/ppp-prod/common:node_ubuntu_8_9_1 
+
+# Replace shell with bash so we can source files
+RUN rm /bin/sh && ln -s /bin/bash /bin/sh
+
+# Set environment variables
+# ENV NODE_ENV ''
+ENV ZIPKIN_URL ''
+ENV API_URL ''
+ENV PUBLIC_URL 'https://viu-static.akamaized.net'
+
+# Set the work directory
+RUN mkdir -p /var/www/app/current
+RUN mkdir -p /var/www/app/current/logs
+WORKDIR /var/www/app/current
+
+# Add our package.json and install *before* adding our application files
+ADD package.json ./
+RUN yarn cache clean
+ADD yarn.lock ./
+RUN cat /etc/hosts
+#RUN echo "104.26.7.176 cdn.cypress.io" >> /etc/hosts && echo "13.234.176.102 github.com"  >> /etc/hosts && echo "104.16.25.35 registry.yarnpkg.com" >> /etc/hosts && echo "104.20.23.46 nodejs.org" >> /etc/hosts && echo "104.26.7.176 download.cypress.io" >> /etc/hosts && yarn
+RUN yarn 
+
+# Add application files
+COPY . .
+
+# Build Project
+RUN yarn build
+
+#Expose the port
+#EXPOSE 8000
+
+#ENTRYPOINT ["node", "build/server/index.js"]
+
+
+# Intermidiate 
+FROM us.gcr.io/ppp-prod/common:gsutil-ppp-prod
+COPY --from=0 /var/www/app/current /root/
+ 
+RUN gsutil -m -h "Cache-Control:public, max-age=86400" cp -a public-read -r /root/build/client/* gs://viu-static.vuclip.com/
+
+
+
+# MAIN container 
+
+FROM us.gcr.io/ppp-prod/common:node_8_9_1_perf_v2
+COPY --from=0 /var/www/app/current /var/www/app/current/
+RUN mkdir -p /var/www/app/current
+RUN rm -f /var/www/app/current/yarn.lock && \
+    rm -rf /var/www/app/current/node_modules || echo 0
+RUN cd /var/www/app/current/ 
+ENV appDir /var/www/app/current/ 
+WORKDIR ${appDir}
+
+ENV ZIPKIN_URL  ''
+ENV API_URL ''
+ENV NODE_ENV ''
+ENV HOST_URL ''
+ENV REACT_APP_HOST_URL ''
+ENV NODE_OPTS ''
+RUN yarn cache clean
+
+
+
+
+# Commenting on 27 Mar 2018 as per discussion with imran & tushar
+ENV PUBLIC_URL 'https://viu-static.akamaized.net'
+#ENV PUBLIC_URL ''
+
+# Install pm2 so we can run our application
+#RUN npm i -g pm2 
+    
+#RUN pm2 install pm2-logrotate && pm2 install pm2-server-monit
+
+# Add our package.json and install *before* adding our application files
+#ADD package.json ./
+# NR configuration
+#RUN npm install newrelic --save && \
+#    npm install @newrelic/native-metrics --save
+ADD yarn.lock ./
+RUN yarn install
+
+
+# Add application files
+ADD . /var/www/app/current
+
+# Build Project
+# RUN yarn build
+RUN cp -pr /var/www/app/current/node_modules/newrelic/newrelic.js /var/www/app/current/newrelic.js 
+
+#Expose the port
+EXPOSE 8000
+
+#ENTRYPOINT ["pm2", "start", "pm2_config.yml", "--no-daemon"]
+ENTRYPOINT /usr/local/nvm/versions/node/v8.9.1/bin/node $NODE_OPTS build/server/index.js
+#ENTRYPOINT ["node", "$NODE_OPTS", "cluster"]
+
+EOF
+        '''
+    }
+    
+    stage('Build image') {
+        docker.withRegistry('https://us.gcr.io', 'gcr:ppp-prod') {
+            app = docker.build("ppp-prod/viu-browser2")
+        }
+}
+stage('Push image') {
+  docker.withRegistry('https://us.gcr.io', 'gcr:ppp-prod') {
+    app.push("v${env.BUILD_NUMBER}")
+    
+  }
+}
+}
+
+// The Deploy stage does not limit concurrency but requires manual input
+// from a user. Several builds might reach this step waiting for input.
+// When a user promotes a specific build all preceding builds are aborted,
+// ensuring that the latest code is always deployed.
+// stage('Deploy') {
+//   input "Deploy?"
+//   milestone()
+//   node("master") {
+//     echo "Deploying"
+//   }
+// }
